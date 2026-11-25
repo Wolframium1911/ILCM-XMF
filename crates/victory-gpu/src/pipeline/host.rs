@@ -522,7 +522,18 @@ impl HostPipeline {
             let pso = match made {
                 Ok(pso) => pso,
                 Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host pipeline refused");
+                    // The description there is the root signature and the CS
+                    // blob: log their sizes so a refusal can be compared with
+                    // one the device accepts.
+                    tracing::warn!(
+                        error = %e,
+                        ?shaders,
+                        cs = desc.CS.BytecodeLength,
+                        root = root_blob.len(),
+                        params = params.len(),
+                        samplers = samplers.len(),
+                        "host pipeline refused"
+                    );
                     host.log_messages();
                     return None;
                 }

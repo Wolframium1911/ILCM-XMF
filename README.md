@@ -36,3 +36,5 @@ history; this tree is a local working copy prepared for code-only distribution.
 
 Credits to https://github.com/xcl-dev/xcl https://github.com/Marvisak/VIctory 
 https://github.com/fxceless/victory-fork https://github.com/LooperSalty/AnyXboxX 
+https://github.com/uiliannn/VItoriaBr https://github.com/Zettrox/ztrx 
+https://github.com/JoshuuDev/victory-amd and all its contributors.
