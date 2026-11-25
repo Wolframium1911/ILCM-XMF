@@ -56,6 +56,11 @@ fn build() -> &'static [u8; 32] {
                 bytes.extend_from_slice(&limit.to_le_bytes());
                 // Which group barriers wait is part of the translation too.
                 bytes.push(victory_shader::emit::group_sync());
+                // And the host's widest wave (made known with the device,
+                // like the view limit): wave64 programs are translated for
+                // 32-lane waves on a card without wider ones, so an entry
+                // made on another card must not be served.
+                bytes.extend_from_slice(&victory_shader::emit::host_max_wave().to_le_bytes());
                 // So are the switches that pick the form of a wave64 program:
                 // without them here a run with `VICTORY_WAVE_WIDE=0` was
                 // served the translations an earlier run of the same
@@ -92,11 +97,47 @@ fn build() -> &'static [u8; 32] {
 /// The translation of a console shader container, from the cache when
 /// there is one.
 pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
     match CACHE.get() {
-        Some(cache) => cached(cache, build(), container, translate),
+        Some(cache) => cached(cache, build(), container, translate).map(|(shader, _)| shader),
         None => translate(container),
     }
+}
+
+fn translate(container: &[u8]) -> Result<HostShader, String> {
+    victory_shader::emit::translate(container).map_err(|e| e.to_string())
+}
+
+/// Translates `container` into the cache before a run (`victory warm`), so
+/// the run finds it there instead of translating it while the title waits.
+/// The entry is the one a title's pipeline creation looks up: the same
+/// container bytes and the same build fingerprint, for which the host
+/// device is made first, as at run time (its view heap limit and its wave
+/// width are part of the translation).
+///
+/// `Ok(true)`: translated and stored now; `Ok(false)`: it was cached
+/// already. An `Err` is a shader that does not translate (a run drops its
+/// draws as well), or one whose entry did not read back.
+pub fn warm(container: &[u8]) -> Result<bool, String> {
+    crate::descriptor::host::probe_view_limit();
+    let cache = CACHE
+        .get()
+        .ok_or("no shader cache folder (use_shader_cache)")?;
+    match cached(cache, build(), container, translate)?.1 {
+        Outcome::Hit => Ok(false),
+        Outcome::Stored => Ok(true),
+        Outcome::Unstored => Err("translated, but the cache entry did not read back".to_owned()),
+    }
+}
+
+/// Where [`cached`]'s translation came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// Read from the cache.
+    Hit,
+    /// Translated now and stored.
+    Stored,
+    /// Translated now; the entry would not read back, so nothing is stored.
+    Unstored,
 }
 
 /// The cache entry's converter: the build and the container in, the
@@ -126,7 +167,7 @@ fn cached(
     build: &[u8; 32],
     container: &[u8],
     translate: impl Fn(&[u8]) -> Result<HostShader, String> + Send + Sync,
-) -> Result<HostShader, String> {
+) -> Result<(HostShader, Outcome), String> {
     let input = [&build[..], container].concat();
     let converter = Translate {
         translate,
@@ -137,20 +178,20 @@ fn cached(
             .get_or_convert(&converter, &input)
             .map_err(|e| format!("{e:#}"))?;
         if let Some(shader) = std::fs::read(&path).ok().and_then(|b| decode(&b)) {
-            let (counter, what) = if converter.ran.load(Ordering::Relaxed) {
-                (&MISSES, "translated and cached")
+            let (counter, what, outcome) = if converter.ran.load(Ordering::Relaxed) {
+                (&MISSES, "translated and cached", Outcome::Stored)
             } else {
-                (&HITS, "from the cache")
+                (&HITS, "from the cache", Outcome::Hit)
             };
             counter.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(path = %path.display(), "shader {what}");
-            return Ok(shader);
+            return Ok((shader, outcome));
         }
         tracing::debug!(path = %path.display(), "unreadable shader cache entry; translating again");
         let _ = std::fs::remove_file(&path);
     }
     MISSES.fetch_add(1, Ordering::Relaxed);
-    (converter.translate)(container)
+    (converter.translate)(container).map(|shader| (shader, Outcome::Unstored))
 }
 
 const MAGIC: &[u8; 4] = b"VSH1";
@@ -370,21 +411,36 @@ mod tests {
             runs.fetch_add(1, Ordering::Relaxed);
             Ok(shader())
         };
-        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
-        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
+        assert_eq!(
+            cached(&cache, &build, container, translate),
+            Ok((shader(), Outcome::Stored))
+        );
+        assert_eq!(
+            cached(&cache, &build, container, translate),
+            Ok((shader(), Outcome::Hit))
+        );
         assert_eq!(runs.load(Ordering::Relaxed), 1, "the second came from disk");
 
         // Another build translates again.
-        assert_eq!(cached(&cache, &[8; 32], container, translate), Ok(shader()));
+        assert_eq!(
+            cached(&cache, &[8; 32], container, translate),
+            Ok((shader(), Outcome::Stored))
+        );
         assert_eq!(runs.load(Ordering::Relaxed), 2);
 
         // A damaged entry is a miss, translated and stored again.
         for e in walk(dir.path()) {
             std::fs::write(e, b"VSH1 broken").unwrap();
         }
-        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
+        assert_eq!(
+            cached(&cache, &build, container, translate),
+            Ok((shader(), Outcome::Stored))
+        );
         assert_eq!(runs.load(Ordering::Relaxed), 3);
-        assert_eq!(cached(&cache, &build, container, translate), Ok(shader()));
+        assert_eq!(
+            cached(&cache, &build, container, translate),
+            Ok((shader(), Outcome::Hit))
+        );
         assert_eq!(runs.load(Ordering::Relaxed), 3);
 
         // Failures are not stored.
