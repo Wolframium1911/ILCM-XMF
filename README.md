@@ -1,5 +1,7 @@
 # ILCM-XMF
 
+man ILoveChineseModels so much //XCL-Marvisak-fxceless/hyphennn props
+
 Experimental Xbox Series compatibility layer research tree. Runs console-targeted
 binaries on Windows through a host D3D12 backend and translates console GPU programs
 to DXIL. No game files, assets, or title-specific data are included.
