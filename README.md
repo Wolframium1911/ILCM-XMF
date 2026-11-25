@@ -33,3 +33,6 @@ architecture. No title names or proprietary assets appear in this tree.
 
 GPL-3.0-or-later (see `LICENSE`). Upstream project credits are in the original
 history; this tree is a local working copy prepared for code-only distribution.
+
+Credits to https://github.com/xcl-dev/xcl https://github.com/Marvisak/VIctory 
+https://github.com/fxceless/victory-fork https://github.com/LooperSalty/AnyXboxX 
