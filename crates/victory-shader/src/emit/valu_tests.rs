@@ -1722,3 +1722,83 @@ fn v_cvt_off_f32_i4_is_sixteenths() {
         |i| (f32::from(((i[0] << 28) as i32 >> 28) as i8) / 16.0).to_bits(),
     );
 }
+
+/// The low and high dwords of a double.
+fn halves(x: f64) -> [u32; 2] {
+    let b = x.to_bits();
+    [b as u32, (b >> 32) as u32]
+}
+
+/// A register pair is a double: sums and products in doubles, and the
+/// conversions to and from floats (the water passes sum a wave in doubles).
+#[test]
+fn f64_pairs_add_multiply_and_convert() {
+    // v_add_f64 v[5:6], v[1:2], v[3:4]; v_cvt_f32_f64 v0, v[5:6]
+    let add_to_float = [vop3(0x164, 5, vgpr(1), vgpr(3), 0).as_slice(), &[vop1(0x00F, 0, vgpr(5))]].concat();
+    // v_add_f64 v[5:6], v[1:2], v[3:4]; v_mov_b32 v0, v6 (the high dword)
+    let add_high = [vop3(0x164, 5, vgpr(1), vgpr(3), 0).as_slice(), &[vop1(0x001, 0, vgpr(6))]].concat();
+    // v_cvt_f64_f32 v[5:6], v1; v_mul_f64 v[5:6], v[5:6], v[5:6]; v_cvt_f32_f64 v0, v[5:6]
+    let square = [
+        &[vop1(0x010, 5, vgpr(1))][..],
+        &vop3(0x165, 5, vgpr(5), vgpr(5), 0),
+        &[vop1(0x00F, 0, vgpr(5))],
+    ]
+    .concat();
+    let pairs: [(f64, f64); 3] = [(100_000_001.0, -100_000_000.0), (0.1, 0.2), (-3.5e-10, 1.0e30)];
+    let cases: Vec<[u32; 4]> = pairs
+        .iter()
+        .map(|&(a, b)| {
+            let ([al, ah], [bl, bh]) = (halves(a), halves(b));
+            [al, ah, bl, bh]
+        })
+        .collect();
+    let double = |c: [u32; 4], k: usize| f64::from_bits(u64::from(c[k]) | u64::from(c[k + 1]) << 32);
+    // In floats, 100000001 - 100000000 is 0 or 8; in doubles it is 1.
+    assert_eq!((100_000_001.0f64 + -100_000_000.0f64) as f32, 1.0);
+    let shader = build_valu_cs(&add_to_float);
+    run_cases(&shader, &cases, |backend, i, c, got| {
+        let want = (double(c, 0) + double(c, 2)) as f32;
+        assert_eq!(got, want.to_bits(), "{backend} case {i}: {} + {}", double(c, 0), double(c, 2));
+    });
+    let shader = build_valu_cs(&add_high);
+    run_cases(&shader, &cases, |backend, i, c, got| {
+        let want = halves(double(c, 0) + double(c, 2))[1];
+        assert_eq!(got, want, "{backend} case {i}");
+    });
+    // (squares that are normal floats: the host flushes float denormals, as the
+    // console does in its default mode)
+    let floats = [3.0f32, 1.0e-15, -16_777_217.0, 0.1];
+    let cases: Vec<[u32; 4]> = floats.iter().map(|f| [f.to_bits(), 0, 0, 0]).collect();
+    let shader = build_valu_cs(&square);
+    run_cases(&shader, &cases, |backend, i, c, got| {
+        let x = f64::from(f32::from_bits(c[0]));
+        assert_eq!(got, ((x * x) as f32).to_bits(), "{backend} case {i}: {x}");
+    });
+}
+
+/// `v_permlanex16_b32`: each lane reads, in the other row of 16 of its 32,
+/// the lane its nibble of {src2, src1} names.
+#[test]
+fn permlanex16_reads_the_other_row() {
+    // v_permlanex16_b32 v5, v0, s0, s1; v_readlane_b32 s6, v5, s2; v_mov_b32 v0, s6
+    let body = [
+        0xD778_0005,
+        0x0004_0100,
+        0xD760_0006,
+        0x0000_0505,
+        vop1(0x001, 0, sgpr(6)),
+    ];
+    let shader = build_cs(&body, 32, 0);
+    let mut cases = Vec::new();
+    for (lo, hi) in [(0x7654_3210u32, 0xFEDC_BA98u32), (0, 0), (0x0F1E_2D3C, 0x4B5A_6978)] {
+        for lane in [0u32, 5, 15, 16, 22, 31] {
+            cases.push([lo, hi, lane, 0]);
+        }
+    }
+    run_cases_on(&shader, &cases, &[("hardware", false)], |backend, i, c, got| {
+        let (sel, lane) = (u64::from(c[0]) | u64::from(c[1]) << 32, c[2]);
+        let row = (lane & !31) | ((lane & 16) ^ 16);
+        let want = row | (sel >> (4 * (lane & 15)) & 15) as u32;
+        assert_eq!(got, want, "{backend} case {i}: lane {lane}");
+    });
+}

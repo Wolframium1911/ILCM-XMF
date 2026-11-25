@@ -34,6 +34,10 @@ pub(crate) enum Op {
     Or,
     And,
     Xor,
+    /// A sum of doubles, the low (`AddD`) and high (`AddDHi`) dword of each
+    /// lane's term and of the sum in a register pair ([`Section::pairs`]).
+    AddD,
+    AddDHi,
 }
 
 impl Op {
@@ -67,12 +71,14 @@ impl Op {
             Op::MaxI => k == 0x8000_0000,
             Op::MinF => k == 0x7F80_0000,
             Op::MaxF => k == 0xFF80_0000,
+            Op::AddD => k == 0,
+            Op::AddDHi => k == 0 || k == 0x8000_0000,
         }
     }
 
     /// Counting a lane twice changes the result.
     fn counts(self) -> bool {
-        matches!(self, Op::AddU | Op::AddF | Op::AddH | Op::Xor)
+        matches!(self, Op::AddU | Op::AddF | Op::AddH | Op::Xor | Op::AddD | Op::AddDHi)
     }
 }
 
@@ -132,6 +138,9 @@ pub(crate) enum Shape {
 pub(crate) struct Section {
     pub end: usize,
     pub shapes: HashMap<Value, Shape>,
+    /// For a sum of doubles: each dword's term, by the other dword's term
+    /// (low by high and high by low).
+    pub pairs: HashMap<Value, Value>,
 }
 
 /// Every whole-wave section of `block`, by start index.
@@ -169,8 +178,9 @@ pub(crate) fn sections(p: &Program, block: usize) -> HashMap<usize, Section> {
         let Some(end) = end else {
             break;
         };
-        let shapes = simulate(&insts[i + 1..end], wave, saved);
-        out.insert(i, Section { end, shapes });
+        let mut pairs = HashMap::new();
+        let shapes = simulate(&insts[i + 1..end], wave, saved, &mut pairs);
+        out.insert(i, Section { end, shapes, pairs });
         i = end + 1;
     }
     out
@@ -257,7 +267,12 @@ fn combine(op: Op, a: Sym, b: Sym) -> Sym {
     }
 }
 
-fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
+fn simulate(
+    insts: &[Inst],
+    wave: u32,
+    saved: Value,
+    pairs: &mut HashMap<Value, Value>,
+) -> HashMap<Value, Shape> {
     let all = if wave == 64 {
         u64::MAX
     } else {
@@ -304,6 +319,17 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
                 && let Some(&(_, w)) = inst.writes.iter().find(|w| matches!(w.0, Reg::S(_)))
             {
                 masked.push(w);
+            }
+            // A copy keeps what it copies (a sum's dword moved to the
+            // register the code after the section reads).
+            if name == "s_mov_b32"
+                && let (Some(&Operand::Scalar { code, .. }), [(_, w)]) =
+                    (src.first(), inst.writes.as_slice())
+                && code != NULL
+                && let Some(x) = inst.read(Reg::S(code))
+            {
+                uni.insert(*w, uni.get(&x).copied().unwrap_or(Sym::Uni(x)));
+                continue;
             }
             for &(_, w) in &inst.writes {
                 uni.entry(w).or_insert(Sym::Unknown);
@@ -357,6 +383,10 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
                     .unwrap_or(Sym::Unknown);
                 uni.insert(w, s);
             }
+            continue;
+        }
+        if name == "v_add_f64" {
+            add_f64(inst, v, wave, exec, &mut vec, &uni, pairs, &lanes, modifiers);
             continue;
         }
         let Some(Operand::Vector { reg: dreg, .. }) = v.dst else {
@@ -517,6 +547,94 @@ fn simulate(insts: &[Inst], wave: u32, saved: Value) -> HashMap<Value, Shape> {
         vec.insert(dst, merged);
     }
     shapes(vec, uni, wave)
+}
+
+/// `v_add_f64` in a section: a register pair per lane, each dword a sum
+/// of its own terms over the same lanes (the console's expansion of a
+/// wave sum of doubles moves the two dwords with DPP and lane reads one
+/// after the other, then adds the pairs).
+#[allow(clippy::too_many_arguments)]
+fn add_f64(
+    inst: &Inst,
+    v: &crate::gfx10::Valu,
+    wave: u32,
+    exec: u64,
+    vec: &mut HashMap<Value, Vec<Sym>>,
+    uni: &HashMap<Value, Sym>,
+    pairs: &mut HashMap<Value, Value>,
+    lanes: &dyn Fn(&Operand, &HashMap<Value, Vec<Sym>>, &HashMap<Value, Sym>) -> Vec<Sym>,
+    modifiers: bool,
+) {
+    let unknown = || vec![Sym::Unknown; wave as usize];
+    let (lo_dst, hi_dst) = match v.dst {
+        Some(Operand::Vector { reg, .. }) => (inst.write(Reg::V(reg)), inst.write(Reg::V(reg + 1))),
+        _ => (None, None),
+    };
+    let (Some(lo_dst), Some(hi_dst)) = (lo_dst, hi_dst) else {
+        for &(_, w) in &inst.writes {
+            vec.insert(w, unknown());
+        }
+        return;
+    };
+    let pair = |op: Option<&Operand>| -> (Vec<Sym>, Vec<Sym>) {
+        let next = match op.copied() {
+            Some(Operand::Vector { reg, dwords }) => Operand::Vector { reg: reg + 1, dwords },
+            Some(Operand::Scalar { code, dwords }) if code != NULL => {
+                Operand::Scalar { code: code + 1, dwords }
+            }
+            _ => return (unknown(), unknown()),
+        };
+        (lanes(op.unwrap(), vec, uni), lanes(&next, vec, uni))
+    };
+    let ((alo, ahi), (blo, bhi)) = (pair(v.src.first()), pair(v.src.get(1)));
+    let dst_reg = |k: u8| Operand::Vector { reg: k, dwords: 1 };
+    let Some(Operand::Vector { reg: dreg, .. }) = v.dst else {
+        return;
+    };
+    let (old_lo, old_hi) = (lanes(&dst_reg(dreg), vec, uni), lanes(&dst_reg(dreg + 1), vec, uni));
+    let red = |s: Sym| match s {
+        Sym::Red { op, src, mask, ident, lanes } => Some((op, src, mask, ident, lanes)),
+        _ => None,
+    };
+    let (mut lo, mut hi) = (Vec::with_capacity(wave as usize), Vec::with_capacity(wave as usize));
+    for l in 0..wave as usize {
+        let sum = (|| {
+            if modifiers {
+                return None;
+            }
+            let (oal, sal, mal, ial, lal) = red(alo[l])?;
+            let (oah, sah, mah, iah, lah) = red(ahi[l])?;
+            let (obl, sbl, mbl, ibl, lbl) = red(blo[l])?;
+            let (obh, sbh, mbh, ibh, lbh) = red(bhi[l])?;
+            let same = sal == sbl && sah == sbh && sal != sah
+                && [mah, mbl, mbh].iter().all(|&m| m == mal)
+                && ial == ibl && iah == ibh
+                && lal == lah && lbl == lbh && lal & lbl == 0
+                && Op::AddD.identity(ial) && Op::AddDHi.identity(iah)
+                && oal.is_none_or(|o| o == Op::AddD) && obl.is_none_or(|o| o == Op::AddD)
+                && oah.is_none_or(|o| o == Op::AddDHi) && obh.is_none_or(|o| o == Op::AddDHi);
+            same.then_some((sal, sah, mal, ial, iah, lal | lbl))
+        })();
+        match sum {
+            Some((sl, sh, mask, il, ih, set)) => {
+                pairs.insert(sl, sh);
+                pairs.insert(sh, sl);
+                lo.push(Sym::Red { op: Some(Op::AddD), src: sl, mask, ident: il, lanes: set });
+                hi.push(Sym::Red { op: Some(Op::AddDHi), src: sh, mask, ident: ih, lanes: set });
+            }
+            None => {
+                lo.push(Sym::Unknown);
+                hi.push(Sym::Unknown);
+            }
+        }
+    }
+    let merge = |new: Vec<Sym>, old: Vec<Sym>| -> Vec<Sym> {
+        (0..wave as usize)
+            .map(|l| if exec >> l & 1 != 0 { new[l] } else { old[l] })
+            .collect()
+    };
+    vec.insert(lo_dst, merge(lo, old_lo));
+    vec.insert(hi_dst, merge(hi, old_hi));
 }
 
 fn constant(inst: &Inst) -> Option<u64> {
