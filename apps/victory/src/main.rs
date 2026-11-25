@@ -8,6 +8,7 @@ mod inspect;
 mod run;
 mod shader;
 mod translate;
+mod warm;
 
 use std::path::PathBuf;
 
@@ -79,6 +80,20 @@ enum Command {
         #[arg(long)]
         pipelines: bool,
         /// Print one line per program and outcome.
+        #[arg(long)]
+        list: bool,
+        /// Worker threads (default: every logical core).
+        #[arg(long)]
+        jobs: Option<usize>,
+    },
+    /// Translate every shader found into the shader cache ahead of a run,
+    /// so the first run reads them from the cache instead of translating
+    /// them while the title waits. Run it with the same build and
+    /// VICTORY_* settings as the title. Defaults to the configured game
+    /// and test-title directories.
+    Warm {
+        paths: Vec<PathBuf>,
+        /// Print each shader that does not translate.
         #[arg(long)]
         list: bool,
         /// Worker threads (default: every logical core).
@@ -163,6 +178,7 @@ fn main() -> Result<()> {
             }
             translate::run(paths, validate, pipelines, list, jobs)
         }
+        Command::Warm { paths, list, jobs } => warm::run(paths, list, jobs),
         Command::Run {
             exe,
             unimplemented,

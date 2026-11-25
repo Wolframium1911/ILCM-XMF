@@ -49,6 +49,14 @@ pub fn use_shader_cache(dir: std::path::PathBuf) {
     let _ = dir;
 }
 
+/// Translates a shader container into the cache folder [`use_shader_cache`]
+/// set, ahead of a run (`victory warm`). `Ok(true)`: translated now;
+/// `Ok(false)`: it was cached already.
+#[cfg(windows)]
+pub fn warm_shader(container: &[u8]) -> Result<bool, String> {
+    victory_gpu::shader_cache::warm(container)
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "d3d12x",

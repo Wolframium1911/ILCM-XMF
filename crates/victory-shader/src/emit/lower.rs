@@ -1016,7 +1016,10 @@ fn own_bits_on() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_WAVE_OWN_BITS").is_none_or(|v| v != "0"))
 }
 
-pub(super) fn host_max_wave() -> u32 {
+/// The host's widest wave, as [`set_host_max_wave`] gave it (0: not known).
+/// Part of the translation (wave64 programs on a 32-lane host), so the
+/// shader cache's key holds it too.
+pub fn host_max_wave() -> u32 {
     #[cfg(test)]
     if let Some(lanes) = TEST_HOST_WAVE.get() {
         return lanes;
