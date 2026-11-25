@@ -70,6 +70,11 @@ pub const USER_VIEW_ADDRESS: u32 = 0x101;
 /// a spilled user-data table.
 pub const USER_VIEW_BIAS: u32 = 0x103;
 
+/// `VICTORY_WAVE64_FALLBACK=1`: see the `WaveSize` attribute in `assemble`.
+pub(crate) fn wave64_fallback() -> bool {
+    std::env::var_os("VICTORY_WAVE64_FALLBACK").is_some()
+}
+
 /// `ShaderFlags` bits (metadata) and their `SFI0` feature bits.
 pub(crate) mod flags {
     pub const DOUBLES: u64 = 1 << 2;
@@ -728,10 +733,21 @@ impl Shader {
                 }
             }
         }
+        // `VICTORY_WAVE64_FALLBACK=1`: a program that needs 64-lane waves on a
+        // 32-lane host is emitted without the requirement. The host's runtime
+        // refuses `WaveSize(64)` when it has 32 lanes (the whole pipeline is
+        // dropped, and the dispatch with it); without the requirement the
+        // program runs in 32-lane waves: the halves then see each other's
+        // lanes as absent, so results are wrong where a program reads the
+        // other half, and nothing hangs.
         if let Some(n) = self.wave_size {
-            props.push(i32c(&mut self, 11));
-            let n = Some(i32c(&mut self, n));
-            props.push(self.m.md_node(vec![n]));
+            if n == 64 && crate::emit::host_max_wave() == 32 && wave64_fallback() {
+                eprintln!("WAVE64-FALLBACK: console lanes on a 32-lane host");
+            } else {
+                props.push(i32c(&mut self, 11));
+                let n = Some(i32c(&mut self, n));
+                props.push(self.m.md_node(vec![n]));
+            }
         }
         let props =
             (!props.is_empty()).then(|| self.m.md_node(props.into_iter().map(Some).collect()));
@@ -822,7 +838,11 @@ impl Shader {
             geometry: self.geometry.map(|g| g.max_vertices),
             bindings: &bindings,
             threads: self.threads.unwrap_or_default(),
-            wave_size: self.wave_size,
+            wave_size: if self.wave_size == Some(64) && crate::emit::host_max_wave() == 32 && wave64_fallback() {
+                None
+            } else {
+                self.wave_size
+            },
         });
         let hash = [0u8; 20];
         let psg1 = container::signature(&self.prims, false);
