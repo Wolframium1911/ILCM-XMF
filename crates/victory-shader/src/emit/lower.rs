@@ -488,22 +488,53 @@ fn lane_uniform(p: &Program, st: &Structured, all: &[bool]) -> HashSet<Value> {
                 {
                     v.src.clone()
                 }
+                // Plain LDS reads (`lds_meetings` ensures no write in the same lane-branch
+                // region): reading a uniform address gives every lane the same value.
+                Fields::Ds {
+                    addr: Some(addr),
+                    gds: false,
+                    ..
+                } if name.starts_with("ds_read")
+                    && !name.contains("addtid")
+                    && !name.contains("_d16") =>
+                {
+                    vec![*addr]
+                }
                 _ => continue,
             };
             if st.guards[b][i].is_some() {
                 continue; // lanes outside EXEC keep another value
             }
+            let relative = name.starts_with("v_movrel") || name.starts_with("v_swap");
             let alike = ops.iter().all(|op| match *op {
-                Operand::Vector { reg, .. } => {
-                    // every dword of the operand the instruction reads from that register on
-                    let read: Vec<Value> =
-                        inst.reads.iter().filter(|r| matches!(r.0, Reg::V(x) if x >= reg)).map(|r| r.1).collect();
+                Operand::Vector { reg, dwords } => {
+                    // every dword of the operand the instruction reads (`v_movrel*` / `v_swap*`
+                    // may read from `reg` up)
+                    let read: Vec<Value> = inst
+                        .reads
+                        .iter()
+                        .filter(|r| {
+                            matches!(
+                                r.0,
+                                Reg::V(x) if if relative {
+                                    x >= reg
+                                } else {
+                                    x.checked_sub(reg).is_some_and(|d| d < dwords)
+                                }
+                            )
+                        })
+                        .map(|r| r.1)
+                        .collect();
                     !read.is_empty() && read.iter().all(|x| same.contains(x))
                 }
                 // a scalar is one value; a lane mask is not, unless a compare of such values made it
-                Operand::Scalar { code, .. } if code != NULL => {
-                    inst.read(Reg::S(code)).is_none_or(|x| !is_mask(x) || same.contains(&x))
-                }
+                Operand::Scalar { code, dwords } if code != NULL => inst
+                    .reads
+                    .iter()
+                    .filter(|r| {
+                        matches!(r.0, Reg::S(x) if x.checked_sub(code).is_some_and(|d| d < dwords))
+                    })
+                    .all(|r| !is_mask(r.1) || same.contains(&r.1)),
                 _ => true,
             });
             if alike {
