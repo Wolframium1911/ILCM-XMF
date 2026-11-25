@@ -560,7 +560,13 @@ fn view_guard() -> bool {
     // (0x80000003) about 100 s into the boat scene in the run of 2026-11-25;
     // the same build with `VICTORY_VIEW_GUARD=0` ran past it. Turn it on to
     // test the aliased-view fix, and check for that assert.
-    *ON.get_or_init(|| std::env::var_os("VICTORY_VIEW_GUARD").is_some_and(|v| v != "0"))
+    *ON.get_or_init(|| {
+        // The tests of this module are the guard's tests: they run it on.
+        if cfg!(test) {
+            return true;
+        }
+        std::env::var_os("VICTORY_VIEW_GUARD").is_some_and(|v| v != "0")
+    })
 }
 
 /// Diagnostics: blocks guarded together with their other views, blocks
