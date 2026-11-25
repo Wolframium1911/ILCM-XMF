@@ -556,7 +556,11 @@ pub(crate) const MANY_VIEWS: usize = 64;
 /// (`VICTORY_VIEW_GUARD`).
 fn view_guard() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_VIEW_GUARD").is_none_or(|v| v != "0"))
+    // Off by default here: with the guard on, the title asserted
+    // (0x80000003) about 100 s into the boat scene in the run of 2026-11-25;
+    // the same build with `VICTORY_VIEW_GUARD=0` ran past it. Turn it on to
+    // test the aliased-view fix, and check for that assert.
+    *ON.get_or_init(|| std::env::var_os("VICTORY_VIEW_GUARD").is_some_and(|v| v != "0"))
 }
 
 /// Diagnostics: blocks guarded together with their other views, blocks
