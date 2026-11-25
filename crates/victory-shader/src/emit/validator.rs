@@ -219,3 +219,32 @@ impl Drop for Validator {
         unsafe { release(self.object) };
     }
 }
+#[cfg(test)]
+mod tests {
+    /// Validates the containers saved by `VICTORY_SHADER_SAVE` and prints
+    /// what the validator says of each (`VICTORY_VALIDATE_DIR`): the
+    /// description of a shader the device refuses, in the validator's words.
+    #[test]
+    fn validate_saved_shaders() {
+        let Ok(dir) = std::env::var("VICTORY_VALIDATE_DIR") else {
+            return;
+        };
+        let mut validator = super::Validator::load(super::Validator::default_path().as_deref())
+            .expect("the validator loads");
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect("the directory reads")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "dxil"))
+            .collect();
+        entries.sort();
+        for path in entries {
+            let mut bytes = std::fs::read(&path).expect("the shader reads");
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            match validator.validate(&mut bytes) {
+                Ok(()) => println!("ok   {name}"),
+                Err(e) => println!("FAIL {name}: {e}"),
+            }
+        }
+    }
+}

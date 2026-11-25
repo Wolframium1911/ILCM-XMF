@@ -659,6 +659,11 @@ fn emit_program(
         root_uavs: l.root_uavs,
         root_indexed_views: res.root_indexed_views.clone(),
     };
+    // D3D12 declares at most 32768 bytes of thread-group shared memory: a
+    // shader over it cannot be made into a pipeline at all.
+    if l.lds_bytes > 32768 || std::env::var_os("VICTORY_LDS_LOG").is_some() {
+        eprintln!("LDS {:?} {} bytes", native.stage, l.lds_bytes);
+    }
     Ok((shader, wave_size))
 }
 

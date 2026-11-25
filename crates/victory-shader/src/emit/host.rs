@@ -72,10 +72,13 @@ impl Host {
             // refused pipeline's error then carries.
             if std::env::var_os("VICTORY_D3D12_DEBUG").is_some() {
                 let mut debug: Option<ID3D12Debug> = None;
-                if D3D12GetDebugInterface(&mut debug).is_ok()
-                    && let Some(debug) = debug
-                {
-                    debug.EnableDebugLayer();
+                if D3D12GetDebugInterface(&mut debug).is_ok() {
+                    if let Some(debug) = debug {
+                        debug.EnableDebugLayer();
+                    }
+                    eprintln!("the D3D12 debug layer is on");
+                } else {
+                    eprintln!("no D3D12 debug layer (D3D12GetDebugInterface failed)");
                 }
             }
             let mut device: Option<ID3D12Device> = None;
@@ -206,6 +209,28 @@ impl Host {
                 });
             }
         }
+        // The signature's root-parameter budget is 64 DWORDs: 32-bit
+        // constants cost their count, a root descriptor 2. Past it
+        // `CreateRootSignature` refuses with E_INVALIDARG, which reads
+        // like a refused pipeline.
+        let cost: u32 = params
+            .iter()
+            .map(|p| match p.ParameterType {
+                // SAFETY: a parameter of this type reads its constants.
+                D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS => unsafe {
+                    p.Anonymous.Constants.Num32BitValues
+                },
+                _ => 2,
+            })
+            .sum();
+        if cost > 48 || std::env::var_os("VICTORY_RS_LOG").is_some() {
+            eprintln!(
+                "root signature: {} parameters, {cost} DWORDs of 64, {} static samplers, {} stages",
+                params.len(),
+                samplers.len(),
+                stages.len()
+            );
+        }
         let desc = D3D12_VERSIONED_ROOT_SIGNATURE_DESC {
             Version: D3D_ROOT_SIGNATURE_VERSION_1_1,
             Anonymous: D3D12_VERSIONED_ROOT_SIGNATURE_DESC_0 {
@@ -225,13 +250,15 @@ impl Host {
             let mut blob = None;
             let mut error = None;
             D3D12SerializeVersionedRootSignature(&desc, &mut blob, Some(&mut error))
-                .map_err(err)?;
+                .map_err(|e| format!("root signature serialize: {}", err(e)))?;
             let blob: ID3DBlob = blob.ok_or("no root signature blob")?;
             let bytes = std::slice::from_raw_parts(
                 blob.GetBufferPointer().cast::<u8>(),
                 blob.GetBufferSize(),
             );
-            self.device.CreateRootSignature(0, bytes).map_err(err)
+            self.device
+                .CreateRootSignature(0, bytes)
+                .map_err(|e| format!("root signature: {}", err(e)))
         }
     }
 

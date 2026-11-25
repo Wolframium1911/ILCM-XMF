@@ -159,6 +159,9 @@ pub fn run(
     list: bool,
     jobs: Option<usize>,
 ) -> Result<()> {
+    // VICTORY_LOG=info: the host's own lines (the debug layer's state, a
+    // refused pipeline's reason) on stderr.
+    victory_core::logging::init("warn");
     let paths = crate::default_paths(paths)?;
     // `VICTORY_HOST_MAX_WAVE=32`: translate as for a host whose waves have
     // at most 32 lanes (as the runtime does on such a card).

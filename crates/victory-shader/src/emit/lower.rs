@@ -59,6 +59,9 @@ pub(crate) struct Lowered {
     pub samplers: Vec<[u32; 4]>,
     /// The wave size the shader requires of the host, if any.
     pub wave_size: Option<u32>,
+    /// Thread-group shared memory the emitted shader declares, in bytes
+    /// (D3D12 allows 32768).
+    pub lds_bytes: u32,
     /// Heap handles made with a non-uniform index.
     #[cfg(test)]
     pub nonuniform_handles: u32,
@@ -2241,6 +2244,7 @@ impl<'a> Lower<'a> {
         let wave_size = self.s.wave_size;
         Ok(Lowered {
             wave_size,
+            lds_bytes: self.s.lds_dwords * 4,
             cmp_samplers,
             root_cbvs,
             root_srvs,
